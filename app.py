@@ -19,13 +19,23 @@ try:
 except ImportError as e:
     print(f"缺少必要库: {e}")
 
-# --- 尝试读取 Secrets ---
+# --- 尝试读取 Secrets (核心修复部分) ---
 SECRETS = {}
 try:
+    # 1. 优先读取本地文件 (本地开发用)
     if os.path.exists(".streamlit/secrets.toml"):
         SECRETS = toml.load(".streamlit/secrets.toml")
-    elif "aws" in os.environ:
-        pass
+    
+    # 2. 如果本地文件不存在，尝试读取环境变量 (Render部署用)
+    # 只要检测到环境变量里有 aws_access_key_id，就手动构建 SECRETS 字典
+    elif os.environ.get("aws_access_key_id"):
+        SECRETS = {
+            "aws": {
+                "aws_access_key_id": os.environ.get("aws_access_key_id"),
+                "aws_secret_access_key": os.environ.get("aws_secret_access_key"),
+                "bucket_name": os.environ.get("bucket_name")
+            }
+        }
 except Exception as e:
     print(f"读取配置失败: {e}")
 
@@ -43,8 +53,11 @@ if "aws" in SECRETS:
         )
         BUCKET_NAME = SECRETS["aws"]["bucket_name"]
         HISTORY_DIR = f"{BUCKET_NAME}/history_charts"
+        # 尝试列出目录以验证权限
         if not fs.exists(HISTORY_DIR):
-            fs.makedirs(HISTORY_DIR)
+            try:
+                fs.makedirs(HISTORY_DIR)
+            except: pass # 可能桶已存在但只是没权限列出根目录
         USE_CLOUD = True
         print("✅ AWS S3 连接成功")
     except Exception as e:
@@ -75,19 +88,12 @@ def process_text_smart(text, wrap_width):
 
 # 百分比格式化函数
 def format_pct(value):
-    """
-    将数值转换为保留1位小数的百分比字符串。
-    例如: 0.0312 -> 3.1%
-    """
     if pd.isna(value) or value == '':
         return ""
     try:
-        # 尝试转换为浮点数
         f_val = float(value)
-        # 乘以100并保留1位小数
         return f"{f_val * 100:.1f}%"
     except (ValueError, TypeError):
-        # 如果转换失败（例如已经是字符串），则原样返回
         return str(value)
 
 def generate_mock_data(start, end):
@@ -321,7 +327,7 @@ sidebar = dbc.Card(
             className="mb-3",
         ),
         
-        # --- 【修改】将保存区域移动到侧边栏，位置醒目 ---
+        # --- 保存区域 ---
         html.Div([
             html.Hr(),
             dbc.Card([
@@ -333,7 +339,6 @@ sidebar = dbc.Card(
                 ], className="p-2")
             ], className="mb-3 border-success", outline=True)
         ], id="save-area"),
-        # -------------------------------------------
         
         html.Hr(),
         
@@ -420,7 +425,6 @@ content = html.Div(
                 config={'editable': True, 'scrollZoom': True, 'displayModeBar': True, 'showLink': False}
             )
         ),
-        # --- 【修改】此处原本的 save-area 已移除 ---
     ],
     className="p-4"
 )
