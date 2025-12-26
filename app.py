@@ -19,7 +19,7 @@ try:
 except ImportError as e:
     print(f"缺少必要库: {e}")
 
-# --- 尝试读取 Secrets (核心修复部分) ---
+# --- 尝试读取 Secrets ---
 SECRETS = {}
 try:
     # 1. 优先读取本地文件 (本地开发用)
@@ -39,32 +39,32 @@ try:
 except Exception as e:
     print(f"读取配置失败: {e}")
 
-# --- 云端连接初始化 ---
+# --- 云端配置 (修复版) ---
 USE_CLOUD = False
-fs = None
 BUCKET_NAME = ""
 HISTORY_DIR = ""
 
 if "aws" in SECRETS:
-    try:
-        fs = s3fs.S3FileSystem(
-            key=SECRETS["aws"]["aws_access_key_id"],
-            secret=SECRETS["aws"]["aws_secret_access_key"]
-        )
-        BUCKET_NAME = SECRETS["aws"]["bucket_name"]
-        HISTORY_DIR = f"{BUCKET_NAME}/history_charts"
-        # 尝试列出目录以验证权限
-        if not fs.exists(HISTORY_DIR):
-            try:
-                fs.makedirs(HISTORY_DIR)
-            except: pass # 可能桶已存在但只是没权限列出根目录
-        USE_CLOUD = True
-        print("✅ AWS S3 连接成功")
-    except Exception as e:
-        print(f"AWS S3 连接失败: {e}")
+    BUCKET_NAME = SECRETS["aws"]["bucket_name"]
+    HISTORY_DIR = f"{BUCKET_NAME}/history_charts"
+    USE_CLOUD = True
+    print("✅ AWS 配置已加载 (连接将在操作时动态创建)")
 else:
     print("⚠️ 未找到 AWS 配置，云端功能禁用")
 
+# --- 核心修复: 动态获取 FS 对象 ---
+def get_fs():
+    """每次调用时创建新的 S3 连接，避免多进程 fork-safe 问题"""
+    if not USE_CLOUD:
+        return None
+    try:
+        return s3fs.S3FileSystem(
+            key=SECRETS["aws"]["aws_access_key_id"],
+            secret=SECRETS["aws"]["aws_secret_access_key"]
+        )
+    except Exception as e:
+        print(f"S3 连接创建失败: {e}")
+        return None
 
 # --- 初始化 Dash 应用 ---
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], title="股价复盘系统 (Dash版)")
@@ -248,6 +248,7 @@ def parse_excel_content(contents, filename):
                 temp['Start date'] = pd.to_datetime(temp['Start date'], errors='coerce')
                 temp['End date'] = pd.to_datetime(temp['End date'], errors='coerce')
                 temp = temp.dropna(subset=['Start date'])
+                
                 if not temp.empty:
                     phases_list.append(temp)
 
@@ -507,18 +508,23 @@ def update_chart(n_updates, history_file, mode,
                  arrow_len, stag_steps, scale):
     
     ctx = callback_context
-    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    # trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
     
+    # --- 修复：使用局部 fs 对象 ---
     if mode == "history":
         if not history_file or not USE_CLOUD:
             return go.Figure()
         try:
+            fs = get_fs() # 动态获取连接
             full_path = history_file
-            with fs.open(full_path, 'r') as f:
-                fig_json = json.load(f)
-            fig = go.Figure(fig_json)
-            fig.update_layout(dragmode='pan')
-            return fig
+            if fs and fs.exists(full_path):
+                with fs.open(full_path, 'r') as f:
+                    fig_json = json.load(f)
+                fig = go.Figure(fig_json)
+                fig.update_layout(dragmode='pan')
+                return fig
+            else:
+                return go.Figure()
         except Exception as e:
             print(f"Load error: {e}")
             return go.Figure()
@@ -590,7 +596,7 @@ def update_chart(n_updates, history_file, mode,
                     hover_txt = process_text_smart(str(row['关键因素']), hover_w)
                 else:
                     hover_txt = process_text_smart(main_txt, hover_w)
-                
+                 
                 cy = p_y + (0.05 if (i % 2) != 0 else 0)
                 fig.add_annotation(
                     x=mid, y=cy, yref="paper", 
@@ -691,12 +697,23 @@ def save_chart_to_cloud(n, filename, ticker, fig_data, relayout_data):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_name = "".join([c for c in filename if c.isalnum() or c in (' ', '_', '-')]).strip() if filename else "Untitled"
         s3_name = f"{timestamp}_{ticker}_{safe_name}.json"
-        path = f"{HISTORY_DIR}/{s3_name}"
         
-        with fs.open(path, "w") as f:
-            json.dump(final_fig_dict, f)
+        # --- 修复：使用局部 fs 对象，并增加路径存在性检查 ---
+        fs = get_fs()
+        if fs:
+            # 确保目录存在 (可选)
+            try:
+                if not fs.exists(HISTORY_DIR):
+                    fs.makedirs(HISTORY_DIR)
+            except: pass
             
-        return dbc.Alert(f"✅ 保存成功 (含拖拽): {s3_name}", color="success", dismissable=True)
+            path = f"{HISTORY_DIR}/{s3_name}"
+            with fs.open(path, "w") as f:
+                json.dump(final_fig_dict, f)
+            return dbc.Alert(f"✅ 保存成功 (含拖拽): {s3_name}", color="success", dismissable=True)
+        else:
+            return dbc.Alert("❌ S3 连接建立失败", color="danger")
+            
     except Exception as e:
         return dbc.Alert(f"保存失败: {e}", color="danger", dismissable=True)
 
@@ -712,6 +729,10 @@ def update_file_list(panel_style, n_refresh, n_del, search_term):
         return no_update
     
     try:
+        # --- 修复：使用局部 fs 对象 ---
+        fs = get_fs()
+        if not fs: return []
+
         files = fs.glob(f"{HISTORY_DIR}/*.json")
         files_info = []
         for f in files:
@@ -740,7 +761,10 @@ def update_file_list(panel_style, n_refresh, n_del, search_term):
 def delete_file(n, file_path):
     if n and file_path and USE_CLOUD:
         try:
-            fs.rm(file_path)
+            # --- 修复：使用局部 fs 对象 ---
+            fs = get_fs()
+            if fs:
+                fs.rm(file_path)
         except: pass
     return False
 
