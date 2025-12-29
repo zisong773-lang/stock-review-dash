@@ -81,11 +81,18 @@ def process_text_smart(text, wrap_width):
     return "<br>".join(processed_lines)
 
 def format_pct(value):
+    """
+    修复说明：
+    原代码逻辑会乘以100。
+    现已修改为直接读取数值，并保留2位小数。
+    例如：输入 -5.93 -> 输出 -5.93%
+    """
     if pd.isna(value) or value == '':
         return ""
     try:
         f_val = float(value)
-        return f"{f_val * 100:.1f}%"
+        # 修改点：去掉 * 100，改为直接格式化，保留2位小数
+        return f"{f_val:.2f}%"
     except (ValueError, TypeError):
         return str(value)
 
