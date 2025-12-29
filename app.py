@@ -61,25 +61,8 @@ def get_fs():
         print(f"S3 连接创建失败: {e}")
         return None
 
-# --- 用户配置管理系统 ---
-SETTINGS_FILE = "user_settings.json"
-
-def load_user_settings():
-    """加载用户保存的默认设置，如果不存在则返回空字典"""
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"读取设置文件失败: {e}")
-    return {}
-
-def get_setting(settings, key, default_val):
-    """辅助函数：优先取设置，否则取默认值"""
-    return settings.get(key, default_val)
-
 # --- 初始化 Dash 应用 ---
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], title="股价复盘系统 (Dash版)")
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], title="股价复盘系统 (Dash Cloud)")
 server = app.server
 
 # --- 辅助函数 ---
@@ -321,219 +304,215 @@ def apply_relayout_to_fig(fig_dict, relayout_data):
     return fig_dict
 
 
-# --- 界面布局 (关键修复：将Layout封装为函数) ---
-# 通过将其封装为函数，每次刷新页面时，都会重新读取最新的 settings
+# --- 界面布局 ---
 
-def serve_layout():
-    # 每次请求布局时，重新读取配置
-    current_settings = load_user_settings()
-    
-    sidebar = dbc.Card(
-        [
-            html.H4("🎛️ 设置", className="card-title"),
+sidebar = dbc.Card(
+    [
+        html.H4("🎛️ 设置", className="card-title"),
+        html.Hr(),
+        dbc.Label("系统模式"),
+        dbc.RadioItems(
+            options=[
+                {"label": "🚀 生成新图表", "value": "new"},
+                {"label": "📂 云端历史记录", "value": "history"},
+            ],
+            value="new",
+            id="app-mode-selector",
+            className="mb-3",
+        ),
+        
+        # --- 保存区域 ---
+        html.Div([
             html.Hr(),
-            dbc.Label("系统模式"),
+            dbc.Card([
+                dbc.CardBody([
+                    html.H5("💾 保存云端快照", className="card-title text-success", style={'fontSize': '1rem', 'fontWeight': 'bold'}),
+                    html.Div("包含当前拖拽后的位置", className="text-muted small mb-2"),
+                    dbc.Input(id="save-filename", placeholder="输入文件名 (如: TSLA_复盘)", size="sm", className="mb-2"),
+                    dbc.Button("☁️ 立即保存布局", id="save-cloud-btn", color="success", size="sm", className="w-100"),
+                ], className="p-2")
+            ], className="mb-3 border-success", outline=True)
+        ], id="save-area"),
+        
+        html.Hr(),
+        
+        html.Div([
+            dbc.Label("0. 代理设置"),
+            dbc.Checkbox(
+                label="开启代理", 
+                value=False, # 初始默认值
+                id="enable-proxy"
+            ),
+            dbc.Input(
+                id="proxy-addr", 
+                value="http://127.0.0.1:17890", # 初始默认值
+                type="text", 
+                className="mb-3"
+            ),
+            
+            dbc.Label("1. 数据来源"),
             dbc.RadioItems(
                 options=[
-                    {"label": "🚀 生成新图表", "value": "new"},
-                    {"label": "📂 云端历史记录", "value": "history"},
+                    {"label": "Yahoo Finance", "value": "yahoo"},
+                    {"label": "Excel Prices表", "value": "excel_price"},
+                    {"label": "模拟数据", "value": "mock"},
                 ],
-                value="new",
-                id="app-mode-selector",
+                value="yahoo", # 初始默认值
+                id="data-source-select",
                 className="mb-3",
             ),
             
-            # --- 保存区域 ---
-            html.Div([
-                html.Hr(),
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H5("💾 保存云端快照", className="card-title text-success", style={'fontSize': '1rem', 'fontWeight': 'bold'}),
-                        html.Div("包含当前拖拽后的位置", className="text-muted small mb-2"),
-                        dbc.Input(id="save-filename", placeholder="输入文件名 (如: TSLA_复盘)", size="sm", className="mb-2"),
-                        dbc.Button("☁️ 立即保存布局", id="save-cloud-btn", color="success", size="sm", className="w-100"),
-                    ], className="p-2")
-                ], className="mb-3 border-success", outline=True)
-            ], id="save-area"),
+            dbc.Label("2. 时间与代码"),
+            dbc.Input(
+                id="ticker-input", 
+                value="6324.T", # 初始默认值
+                type="text", 
+                placeholder="股票代码", 
+                className="mb-2"
+            ),
+            dbc.Row([
+                dbc.Col(dbc.Input(
+                    id="start-date", 
+                    value="2024-12-23", # 初始默认值
+                    type="date"
+                )),
+                dbc.Col(dbc.Input(
+                    id="end-date", 
+                    value=datetime.today().strftime("%Y-%m-%d"), 
+                    type="date"
+                )),
+            ], className="mb-3"),
             
+            dbc.Label("3. 上传 Excel (含事件/阶段)"),
+            dcc.Upload(
+                id='upload-data',
+                children=html.Div(['拖拽或点击上传']),
+                style={
+                    'width': '100%', 'height': '60px', 'lineHeight': '60px',
+                    'borderWidth': '1px', 'borderStyle': 'dashed', 'borderRadius': '5px',
+                    'textAlign': 'center', 'margin': '10px 0'
+                },
+                multiple=False
+            ),
+            html.Div(id='output-file-name', className="text-muted small mb-3"),
             html.Hr(),
             
-            html.Div([
-                dbc.Label("0. 代理设置"),
-                dbc.Checkbox(
-                    label="开启代理", 
-                    value=get_setting(current_settings, "enable-proxy", False), 
-                    id="enable-proxy"
-                ),
-                dbc.Input(
-                    id="proxy-addr", 
-                    value=get_setting(current_settings, "proxy-addr", "http://127.0.0.1:17890"), 
-                    type="text", 
-                    className="mb-3"
-                ),
-                
-                dbc.Label("1. 数据来源"),
-                dbc.RadioItems(
-                    options=[
-                        {"label": "Yahoo Finance", "value": "yahoo"},
-                        {"label": "Excel Prices表", "value": "excel_price"},
-                        {"label": "模拟数据", "value": "mock"},
-                    ],
-                    value=get_setting(current_settings, "data-source-select", "yahoo"),
-                    id="data-source-select",
-                    className="mb-3",
-                ),
-                
-                dbc.Label("2. 时间与代码"),
-                dbc.Input(
-                    id="ticker-input", 
-                    value=get_setting(current_settings, "ticker-input", "6324.T"), 
-                    type="text", 
-                    placeholder="股票代码", 
-                    className="mb-2"
-                ),
-                dbc.Row([
-                    dbc.Col(dbc.Input(
-                        id="start-date", 
-                        value=get_setting(current_settings, "start-date", "2024-12-23"), 
-                        type="date"
-                    )),
-                    dbc.Col(dbc.Input(
-                        id="end-date", 
-                        value=get_setting(current_settings, "end-date", datetime.today().strftime("%Y-%m-%d")), 
-                        type="date"
-                    )),
-                ], className="mb-3"),
-                
-                dbc.Label("3. 上传 Excel (含事件/阶段)"),
-                dcc.Upload(
-                    id='upload-data',
-                    children=html.Div(['拖拽或点击上传']),
-                    style={
-                        'width': '100%', 'height': '60px', 'lineHeight': '60px',
-                        'borderWidth': '1px', 'borderStyle': 'dashed', 'borderRadius': '5px',
-                        'textAlign': 'center', 'margin': '10px 0'
-                    },
-                    multiple=False
-                ),
-                html.Div(id='output-file-name', className="text-muted small mb-3"),
-                html.Hr(),
-                
-                dbc.Label("4. 视觉微调"),
-                dbc.Label("导出倍率", html_for="export-scale"),
-                dbc.RadioItems(
-                    options=[{"label": "1x", "value": 1}, {"label": "2x", "value": 2}, {"label": "3x", "value": 3}],
-                    value=get_setting(current_settings, "export-scale", 1), 
-                    id="export-scale", 
-                    inline=True, 
-                    className="mb-2"
-                ),
-                
-                dbc.Label("字体大小 (阶段 / 事件)"),
-                dcc.Slider(
-                    id="phase-font-size", min=10, max=80, marks=None, 
-                    value=get_setting(current_settings, "phase-font-size", 20),
-                    tooltip={"placement": "bottom"}
-                ),
-                dcc.Slider(
-                    id="event-font-size", min=8, max=60, marks=None, 
-                    value=get_setting(current_settings, "event-font-size", 16),
-                    tooltip={"placement": "bottom"}
-                ),
-                
-                dbc.Label("布局间距 (阶段高度 / 底部留白)"),
-                dcc.Slider(
-                    id="phase-label-y", min=1.0, max=1.3, step=0.01, marks=None,
-                    value=get_setting(current_settings, "phase-label-y", 1.02)
-                ),
-                dcc.Slider(
-                    id="bottom-margin", min=50, max=200, marks=None,
-                    value=get_setting(current_settings, "bottom-margin", 80)
-                ),
-                
-                dbc.Label("标签换行 (阶段 / 事件)"),
-                dcc.Slider(
-                    id="label-wrap-width", min=5, max=50, marks=None,
-                    value=get_setting(current_settings, "label-wrap-width", 10)
-                ),
-                dbc.Label("悬浮提示换行字数"),
-                dcc.Slider(
-                    id="hover-wrap-width", min=20, max=80, marks=None,
-                    value=get_setting(current_settings, "hover-wrap-width", 40)
-                ),
-                
-                dbc.Label("防重叠 (引线长度 / 阶梯)"),
-                dcc.Slider(
-                    id="arrow-len-base", min=20, max=150, marks=None,
-                    value=get_setting(current_settings, "arrow-len-base", 50)
-                ),
-                dcc.Slider(
-                    id="stagger-steps", min=3, max=15, marks=None,
-                    value=get_setting(current_settings, "stagger-steps", 6)
-                ),
-                
-                html.Br(),
-                dbc.Button("🔄 更新图表", id="update-btn", color="primary", className="w-100 mb-3"),
-                
-                # --- 保存默认配置区域 ---
-                html.Hr(),
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H6("⚙️ 系统默认配置", className="card-title"),
-                        html.Div("将上方当前的输入值(代理/代码/视觉参数等)保存为下次打开的默认值。", className="text-muted small mb-2"),
-                        dbc.Button("💾 保存当前配置为默认", id="save-defaults-btn", color="dark", outline=True, size="sm", className="w-100"),
-                        html.Div(id="save-defaults-msg", className="mt-2")
-                    ], className="p-2")
-                ], className="mb-3 bg-light"),
-                
-            ], id="control-panel-new"),
+            dbc.Label("4. 视觉微调"),
+            dbc.Label("导出倍率", html_for="export-scale"),
+            dbc.RadioItems(
+                options=[{"label": "1x", "value": 1}, {"label": "2x", "value": 2}, {"label": "3x", "value": 3}],
+                value=1, # 初始默认值
+                id="export-scale", 
+                inline=True, 
+                className="mb-2"
+            ),
             
-            html.Div([
-                dbc.Button("🔄 刷新列表", id="refresh-list-btn", color="secondary", size="sm", className="mb-3"),
-                dbc.Label("搜索文件"),
-                dbc.Input(id="search-history", placeholder="输入文件名过滤...", className="mb-2"),
-                dbc.Label("选择文件"),
-                dcc.Dropdown(id="history-file-dropdown", options=[], placeholder="选择图表..."),
-                html.Br(),
-                dbc.Button("🗑️ 删除选中文件", id="delete-btn", color="danger", outline=True, size="sm", className="w-100"),
-            ], id="control-panel-history", style={'display': 'none'}),
-        ],
-        body=True,
-        style={"height": "100vh", "overflow-y": "scroll"}
-    )
-
-    content = html.Div(
-        [
-            html.H2("📈 2025 股价复盘系统 (Dash Cloud)", className="display-6"),
+            dbc.Label("字体大小 (阶段 / 事件)"),
+            dcc.Slider(
+                id="phase-font-size", min=10, max=80, marks=None, 
+                value=20, # 初始默认值
+                tooltip={"placement": "bottom"}
+            ),
+            dcc.Slider(
+                id="event-font-size", min=8, max=60, marks=None, 
+                value=16, # 初始默认值
+                tooltip={"placement": "bottom"}
+            ),
+            
+            dbc.Label("布局间距 (阶段高度 / 底部留白)"),
+            dcc.Slider(
+                id="phase-label-y", min=1.0, max=1.3, step=0.01, marks=None,
+                value=1.02 # 初始默认值
+            ),
+            dcc.Slider(
+                id="bottom-margin", min=50, max=200, marks=None,
+                value=80 # 初始默认值
+            ),
+            
+            dbc.Label("标签换行 (阶段 / 事件)"),
+            dcc.Slider(
+                id="label-wrap-width", min=5, max=50, marks=None,
+                value=10 # 初始默认值
+            ),
+            dbc.Label("悬浮提示换行字数"),
+            dcc.Slider(
+                id="hover-wrap-width", min=20, max=80, marks=None,
+                value=40 # 初始默认值
+            ),
+            
+            dbc.Label("防重叠 (引线长度 / 阶梯)"),
+            dcc.Slider(
+                id="arrow-len-base", min=20, max=150, marks=None,
+                value=50 # 初始默认值
+            ),
+            dcc.Slider(
+                id="stagger-steps", min=3, max=15, marks=None,
+                value=6 # 初始默认值
+            ),
+            
+            html.Br(),
+            dbc.Button("🔄 更新图表", id="update-btn", color="primary", className="w-100 mb-3"),
+            
+            # --- 保存默认配置区域 ---
             html.Hr(),
-            html.Div(id="msg-area"),
-            dcc.Loading(
-                dcc.Graph(
-                    id='main-graph', 
-                    style={'height': '85vh'}, 
-                    config={'editable': True, 'scrollZoom': True, 'displayModeBar': True, 'showLink': False}
-                )
-            ),
-        ],
-        className="p-4"
-    )
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("⚙️ 个人默认配置", className="card-title"),
+                    html.Div("将当前设置保存在您的浏览器中 (清空缓存会失效)。", className="text-muted small mb-2"),
+                    dbc.Button("💾 保存为我的默认", id="save-defaults-btn", color="dark", outline=True, size="sm", className="w-100"),
+                    html.Div(id="save-defaults-msg", className="mt-2")
+                ], className="p-2")
+            ], className="mb-3 bg-light"),
+            
+        ], id="control-panel-new"),
+        
+        html.Div([
+            dbc.Button("🔄 刷新列表", id="refresh-list-btn", color="secondary", size="sm", className="mb-3"),
+            dbc.Label("搜索文件"),
+            dbc.Input(id="search-history", placeholder="输入文件名过滤...", className="mb-2"),
+            dbc.Label("选择文件"),
+            dcc.Dropdown(id="history-file-dropdown", options=[], placeholder="选择图表..."),
+            html.Br(),
+            dbc.Button("🗑️ 删除选中文件", id="delete-btn", color="danger", outline=True, size="sm", className="w-100"),
+        ], id="control-panel-history", style={'display': 'none'}),
+    ],
+    body=True,
+    style={"height": "100vh", "overflow-y": "scroll"}
+)
 
-    return dbc.Container(
-        [
-            dbc.Row(
-                [
-                    dbc.Col(sidebar, width=3, className="bg-light"),
-                    dbc.Col(content, width=9),
-                ],
-                className="g-0",
-            ),
-            dcc.Store(id='store-excel-data'), 
-        ],
-        fluid=True,
-    )
+content = html.Div(
+    [
+        html.H2("📈 2025 股价复盘系统 (Dash Cloud)", className="display-6"),
+        html.Hr(),
+        html.Div(id="msg-area"),
+        dcc.Loading(
+            dcc.Graph(
+                id='main-graph', 
+                style={'height': '85vh'}, 
+                config={'editable': True, 'scrollZoom': True, 'displayModeBar': True, 'showLink': False}
+            )
+        ),
+    ],
+    className="p-4"
+)
 
-# 关键：将 app.layout 指向这个函数，而不是函数的结果
-app.layout = serve_layout
+# --- 关键修改：增加 dcc.Store(storage_type='local') ---
+app.layout = dbc.Container(
+    [
+        # 这个组件负责在浏览器本地存储数据
+        dcc.Store(id='local-settings-store', storage_type='local'),
+        
+        dbc.Row(
+            [
+                dbc.Col(sidebar, width=3, className="bg-light"),
+                dbc.Col(content, width=9),
+            ],
+            className="g-0",
+        ),
+        dcc.Store(id='store-excel-data'), 
+    ],
+    fluid=True,
+)
 
 
 # --- Callbacks ---
@@ -550,9 +529,10 @@ def toggle_mode(mode):
     else:
         return {'display': 'none'}, {'display': 'block'}, {'display': 'none'}
 
-# --- 保存默认设置 Callback ---
+# --- 核心逻辑1：保存配置到浏览器 (Local Storage) ---
 @app.callback(
-    Output("save-defaults-msg", "children"),
+    [Output("local-settings-store", "data"),
+     Output("save-defaults-msg", "children")],
     Input("save-defaults-btn", "n_clicks"),
     [State("enable-proxy", "value"),
      State("proxy-addr", "value"),
@@ -570,35 +550,77 @@ def toggle_mode(mode):
      State("arrow-len-base", "value"),
      State("stagger-steps", "value")]
 )
-def save_defaults_to_disk(n, proxy_en, proxy_addr, source, ticker, start, end, 
-                          scale, p_fs, e_fs, p_y, b_margin, wrap_w, hover_w, arrow_len, stag_steps):
+def save_settings_to_browser(n, *args):
     if not n:
-        return ""
+        return no_update, ""
     
+    # 将所有参数打包成字典
     settings_data = {
-        "enable-proxy": proxy_en,
-        "proxy-addr": proxy_addr,
-        "data-source-select": source,
-        "ticker-input": ticker,
-        "start-date": start,
-        "end-date": end,
-        "export-scale": scale,
-        "phase-font-size": p_fs,
-        "event-font-size": e_fs,
-        "phase-label-y": p_y,
-        "bottom-margin": b_margin,
-        "label-wrap-width": wrap_w,
-        "hover-wrap-width": hover_w,
-        "arrow-len-base": arrow_len,
-        "stagger-steps": stag_steps
+        "enable-proxy": args[0],
+        "proxy-addr": args[1],
+        "data-source-select": args[2],
+        "ticker-input": args[3],
+        "start-date": args[4],
+        "end-date": args[5],
+        "export-scale": args[6],
+        "phase-font-size": args[7],
+        "event-font-size": args[8],
+        "phase-label-y": args[9],
+        "bottom-margin": args[10],
+        "label-wrap-width": args[11],
+        "hover-wrap-width": args[12],
+        "arrow-len-base": args[13],
+        "stagger-steps": args[14]
     }
     
+    return settings_data, dbc.Alert("✅ 配置已保存到您的浏览器！", color="success", dismissable=True, style={"padding": "5px", "fontSize": "0.8rem"})
+
+# --- 核心逻辑2：从浏览器加载配置 (Local Storage) ---
+@app.callback(
+    [Output("enable-proxy", "value"),
+     Output("proxy-addr", "value"),
+     Output("data-source-select", "value"),
+     Output("ticker-input", "value"),
+     Output("start-date", "value"),
+     Output("end-date", "value"),
+     Output("export-scale", "value"),
+     Output("phase-font-size", "value"),
+     Output("event-font-size", "value"),
+     Output("phase-label-y", "value"),
+     Output("bottom-margin", "value"),
+     Output("label-wrap-width", "value"),
+     Output("hover-wrap-width", "value"),
+     Output("arrow-len-base", "value"),
+     Output("stagger-steps", "value")],
+    Input("local-settings-store", "data")
+)
+def load_settings_from_browser(data):
+    if not data:
+        # 如果没有保存过，保持页面初始默认值不变
+        return [no_update] * 15
+    
     try:
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(settings_data, f, indent=4)
-        return dbc.Alert("✅ 默认配置已保存，下次打开生效", color="success", dismissable=True, style={"padding": "5px", "fontSize": "0.8rem"})
+        return (
+            data.get("enable-proxy", False),
+            data.get("proxy-addr", "http://127.0.0.1:17890"),
+            data.get("data-source-select", "yahoo"),
+            data.get("ticker-input", "6324.T"),
+            data.get("start-date", "2024-12-23"),
+            data.get("end-date", datetime.today().strftime("%Y-%m-%d")),
+            data.get("export-scale", 1),
+            data.get("phase-font-size", 20),
+            data.get("event-font-size", 16),
+            data.get("phase-label-y", 1.02),
+            data.get("bottom-margin", 80),
+            data.get("label-wrap-width", 10),
+            data.get("hover-wrap-width", 40),
+            data.get("arrow-len-base", 50),
+            data.get("stagger-steps", 6)
+        )
     except Exception as e:
-        return dbc.Alert(f"保存失败: {e}", color="danger", dismissable=True)
+        print(f"Error loading settings: {e}")
+        return [no_update] * 15
+
 
 @app.callback(
     [Output('store-excel-data', 'data'),
@@ -904,4 +926,4 @@ def delete_file(n, file_path):
     return False
 
 if __name__ == "__main__":
-    app.run(debug=True, port=8050)         
+    app.run(debug=True, port=8050)
