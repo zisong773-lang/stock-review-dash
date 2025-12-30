@@ -82,16 +82,37 @@ def process_text_smart(text, wrap_width):
 
 def format_pct(value):
     """
-    修复说明：
-    原代码逻辑会乘以100。
-    现已修改为直接读取数值，并保留2位小数。
-    例如：输入 -5.93 -> 输出 -5.93%
+    智能百分比格式化：
+    1. 如果输入包含 %，去掉 % 后直接使用。
+    2. 如果是纯数字：
+       - abs(数值) <= 1.0 (且不为0): 判定为小数 (如 0.1)，乘以 100 -> 10.00%
+       - abs(数值) > 1.0: 判定为整数 (如 10)，保持不变 -> 10.00%
+       - 0 保持 0.00%
     """
     if pd.isna(value) or value == '':
         return ""
+    
+    # 1. 处理已经是字符串且带 % 的情况
+    val_str = str(value).strip()
+    if '%' in val_str:
+        try:
+            clean_val = val_str.replace('%', '')
+            f_val = float(clean_val)
+            return f"{f_val:.2f}%"
+        except:
+            return val_str # 解析失败直接返回原字符串
+
+    # 2. 处理数字
     try:
         f_val = float(value)
-        # 修改点：去掉 * 100，改为直接格式化，保留2位小数
+        
+        # 智能判定阈值：1.0
+        # 如果是 0.1 -> 变 10%
+        # 如果是 5.93 -> 保持 5.93%
+        # 如果是 -0.05 -> 变 -5%
+        if f_val != 0 and abs(f_val) <= 1.0:
+            f_val = f_val * 100
+            
         return f"{f_val:.2f}%"
     except (ValueError, TypeError):
         return str(value)
