@@ -48,7 +48,7 @@ if "aws" in SECRETS:
 else:
     print("⚠️ 未找到 AWS 配置，云端功能禁用")
 
-# --- 核心修复: 动态获取 FS 对象 ---
+# --- 动态获取 FS 对象 ---
 def get_fs():
     if not USE_CLOUD:
         return None
@@ -81,39 +81,11 @@ def process_text_smart(text, wrap_width):
     return "<br>".join(processed_lines)
 
 def format_pct(value):
-    """
-    智能百分比格式化：
-    1. 如果输入包含 %，去掉 % 后直接使用。
-    2. 如果是纯数字：
-       - abs(数值) <= 1.0 (且不为0): 判定为小数 (如 0.1)，乘以 100 -> 10.00%
-       - abs(数值) > 1.0: 判定为整数 (如 10)，保持不变 -> 10.00%
-       - 0 保持 0.00%
-    """
     if pd.isna(value) or value == '':
         return ""
-    
-    # 1. 处理已经是字符串且带 % 的情况
-    val_str = str(value).strip()
-    if '%' in val_str:
-        try:
-            clean_val = val_str.replace('%', '')
-            f_val = float(clean_val)
-            return f"{f_val:.2f}%"
-        except:
-            return val_str # 解析失败直接返回原字符串
-
-    # 2. 处理数字
     try:
         f_val = float(value)
-        
-        # 智能判定阈值：1.0
-        # 如果是 0.1 -> 变 10%
-        # 如果是 5.93 -> 保持 5.93%
-        # 如果是 -0.05 -> 变 -5%
-        if f_val != 0 and abs(f_val) <= 1.0:
-            f_val = f_val * 100
-            
-        return f"{f_val:.2f}%"
+        return f"{f_val * 100:.1f}%"
     except (ValueError, TypeError):
         return str(value)
 
@@ -139,40 +111,9 @@ def find_col_in_list(columns, keywords, exclude_keywords=None):
                 return col
     return None
 
-def extract_table_dynamically(df, required_keywords, name="Table"):
-    def check_columns(cols):
-        found_cols = {}
-        for key, (kws, ex_kws) in required_keywords.items():
-            found = find_col_in_list(cols, kws, ex_kws)
-            if found:
-                found_cols[key] = found
-            else:
-                return None
-        return found_cols
-
-    found_cols = check_columns(df.columns)
-    if found_cols:
-        return df, found_cols
-
-    max_scan = min(len(df), 100)
-    for i in range(max_scan):
-        row_values = df.iloc[i].astype(str).tolist()
-        is_header_row = True
-        for key, (kws, ex_kws) in required_keywords.items():
-            if not any(kw in cell for cell in row_values for kw in kws):
-                is_header_row = False
-                break
-        
-        if is_header_row:
-            new_df = df.iloc[i+1:].copy()
-            new_df.columns = df.iloc[i]
-            new_found_cols = check_columns(new_df.columns)
-            if new_found_cols:
-                return new_df, new_found_cols
-    return None, None
-
 def aggregate_details(df, group_keys, detail_col, output_detail_name="Detail"):
     if not detail_col: return df
+    # 填充聚合键，防止因合并单元格导致的NaN
     for k in group_keys:
         df[k] = df[k].ffill()
     
@@ -183,102 +124,166 @@ def aggregate_details(df, group_keys, detail_col, output_detail_name="Detail"):
         return "<br>".join([f"• {t}" for t in texts])
 
     agg_dict = {detail_col: join_text}
+    # 保留其他可能存在的列（非聚合键也非详情列），取第一条
+    other_cols = [c for c in df.columns if c not in group_keys and c != detail_col]
+    if other_cols:
+        for oc in other_cols:
+            agg_dict[oc] = 'first'
+
     temp = df.groupby(group_keys, as_index=False).agg(agg_dict)
     temp = temp.rename(columns={detail_col: output_detail_name})
     return temp
 
+# --- 新增核心函数：查找行号 ---
+def find_row_index_with_keyword(df, keywords, start_row=0):
+    """
+    在DataFrame中从上到下查找包含任一关键词的第一行行号
+    """
+    max_scan = min(len(df), 200) # 限制扫描行数
+    for i in range(start_row, max_scan):
+        row_str = " ".join(df.iloc[i].astype(str).tolist())
+        for kw in keywords:
+            if kw in row_str:
+                return i
+    return None
+
+# --- 重写核心解析函数 ---
 def parse_excel_content(contents, filename):
     content_type, content_string = contents.split(',')
     decoded = base64.b64decode(content_string)
     try:
         file = io.BytesIO(decoded)
-        all_sheets = pd.read_excel(file, sheet_name=None)
+        # 读取时不指定header，后续手动切片处理
+        all_sheets = pd.read_excel(file, sheet_name=None, header=None) 
+        
         events_list = []
         phases_list = []
         prices_df = None
         
-        if 'Prices' in all_sheets:
-            prices_df = all_sheets['Prices']
-            prices_df['Date'] = pd.to_datetime(prices_df['Date'])
-            prices_df.set_index('Date', inplace=True)
-
-        event_rules = {
-            'event': (['主要驱动', 'Event'], None),
-            'date': (['日期', 'Date', '时间'], ['起始', '开始', 'Start', '结束', 'End'])
-        }
-        
-        phase_rules = {
-            'phase': (['阶段概述', 'Phase'], None),
-            'start': (['起始日期', '开始日期', 'Start'], None),
-            'end': (['结束日期', 'End'], None)
-        }
+        # 定义定位关键词
+        event_header_keywords = ['日涨跌幅', '主要驱动', 'Event']
+        phase_header_keywords = ['区间涨跌幅', '阶段概述', 'Phase']
 
         for sheet_name, df in all_sheets.items():
-            df.columns = df.columns.astype(str).str.strip()
-            
-            # --- 1. 提取事件表 (Events) ---
-            e_df, e_cols = extract_table_dynamically(df, event_rules, "Events")
-            if e_df is not None:
-                hover_col = find_col_in_list(e_df.columns, ['详细解释', '因果链', 'Detailed'])
-                change_col = find_col_in_list(e_df.columns, ['涨跌幅', '幅度', 'Change', 'Pct', '%'])
+            # 简单处理Prices表
+            if 'Price' in sheet_name or 'Prices' in sheet_name:
+                p_idx = find_row_index_with_keyword(df, ['Date', 'Close', 'Open'])
+                if p_idx is not None:
+                    temp_p = df.iloc[p_idx+1:].copy()
+                    temp_p.columns = df.iloc[p_idx]
+                    temp_p['Date'] = pd.to_datetime(temp_p['Date'])
+                    temp_p.set_index('Date', inplace=True)
+                    prices_df = temp_p
+                continue
 
-                cols_to_keep = [e_cols['date'], e_cols['event']]
-                if hover_col: cols_to_keep.append(hover_col)
-                if change_col: cols_to_keep.append(change_col)
-                
-                temp = e_df[cols_to_keep].copy()
-                
-                group_cols = [e_cols['date'], e_cols['event']]
-                if change_col: group_cols.append(change_col)
-
-                if hover_col:
-                    temp = aggregate_details(temp, group_keys=group_cols, detail_col=hover_col, output_detail_name='详细解释')
-                
-                rename_dict = {e_cols['date']: 'Date', e_cols['event']: '主要驱动'}
-                if change_col: rename_dict[change_col] = '日涨跌幅'
-                
-                temp = temp.rename(columns=rename_dict)
-                temp['Date'] = pd.to_datetime(temp['Date'], errors='coerce')
-                temp = temp.dropna(subset=['Date'])
+            # --- 切分逻辑 ---
+            event_idx = find_row_index_with_keyword(df, event_header_keywords)
+            phase_idx = find_row_index_with_keyword(df, phase_header_keywords)
             
-                if not temp.empty:
+            df_event_part = None
+            df_phase_part = None
+
+            # 确定切片范围
+            if event_idx is not None and phase_idx is not None:
+                if event_idx < phase_idx:
+                    # 事件在上，阶段在下
+                    df_event_part = df.iloc[event_idx : phase_idx].copy()
+                    df_phase_part = df.iloc[phase_idx : ].copy()
+                else:
+                    # 阶段在上，事件在下（容错）
+                    df_phase_part = df.iloc[phase_idx : event_idx].copy()
+                    df_event_part = df.iloc[event_idx : ].copy()
+            elif event_idx is not None:
+                df_event_part = df.iloc[event_idx : ].copy()
+            elif phase_idx is not None:
+                df_phase_part = df.iloc[phase_idx : ].copy()
+
+            # --- 解析事件表 (Events) ---
+            if df_event_part is not None and not df_event_part.empty:
+                df_event_part.columns = df_event_part.iloc[0] # 第一行为表头
+                df_event_part = df_event_part.iloc[1:] # 去掉表头
+                df_event_part.columns = df_event_part.columns.astype(str).str.strip()
+                
+                # 查找列
+                event_rules_date = (['日期', 'Date', '时间'], ['起始', '开始'])
+                event_rules_main = (['主要驱动', 'Event'], None)
+                
+                e_date_col = find_col_in_list(df_event_part.columns, event_rules_date[0], event_rules_date[1])
+                e_main_col = find_col_in_list(df_event_part.columns, event_rules_main[0])
+                
+                if e_date_col and e_main_col:
+                    hover_col = find_col_in_list(df_event_part.columns, ['详细解释', '因果链', 'Detailed'])
+                    change_col = find_col_in_list(df_event_part.columns, ['日涨跌幅', '涨跌幅', 'Change', 'Pct', '%'])
+                    
+                    cols_to_keep = [e_date_col, e_main_col]
+                    if hover_col: cols_to_keep.append(hover_col)
+                    if change_col: cols_to_keep.append(change_col)
+                    
+                    temp = df_event_part[cols_to_keep].copy()
+                    
+                    # 聚合
+                    group_cols = [e_date_col, e_main_col]
+                    if change_col: group_cols.append(change_col)
+                    if hover_col:
+                        temp = aggregate_details(temp, group_keys=group_cols, detail_col=hover_col, output_detail_name='详细解释')
+
+                    rename_dict = {e_date_col: 'Date', e_main_col: '主要驱动'}
+                    if change_col: rename_dict[change_col] = '日涨跌幅'
+                    
+                    temp = temp.rename(columns=rename_dict)
+                    temp['Date'] = pd.to_datetime(temp['Date'], errors='coerce')
+                    temp = temp.dropna(subset=['Date'])
                     events_list.append(temp)
-            
-            # --- 2. 提取阶段表 (Phases) ---
-            p_df, p_cols = extract_table_dynamically(df, phase_rules, "Phases")
-            if p_df is not None:
-                hover_col = find_col_in_list(p_df.columns, ['关键因素', '要点', 'Key Factors'])
-                range_col = find_col_in_list(p_df.columns, ['区间涨跌幅', '区间', 'Range', 'Return'])
 
-                cols_to_keep = [p_cols['start'], p_cols['end'], p_cols['phase']]
-                if hover_col: cols_to_keep.append(hover_col)
-                if range_col: cols_to_keep.append(range_col) 
-
-                temp = p_df[cols_to_keep].copy()
+            # --- 解析阶段表 (Phases) ---
+            if df_phase_part is not None and not df_phase_part.empty:
+                df_phase_part.columns = df_phase_part.iloc[0] # 第一行为表头
+                df_phase_part = df_phase_part.iloc[1:] # 去掉表头
+                df_phase_part.columns = df_phase_part.columns.astype(str).str.strip()
                 
-                group_cols = [p_cols['start'], p_cols['end'], p_cols['phase']]
-                if range_col: group_cols.append(range_col)
-
-                if hover_col:
-                    temp = aggregate_details(temp, group_keys=group_cols, detail_col=hover_col, output_detail_name='关键因素')
+                # 查找列
+                phase_rules_phase = (['阶段概述', 'Phase'], None)
+                phase_rules_start = (['起始日期', '开始日期', 'Start'], None)
+                phase_rules_end = (['结束日期', 'End'], None)
                 
-                rename_dict = {p_cols['start']: 'Start date', p_cols['end']: 'End date', p_cols['phase']: '阶段概述'}
-                if range_col: rename_dict[range_col] = '区间涨跌幅'
-
-                temp = temp.rename(columns=rename_dict)
-                temp['Start date'] = pd.to_datetime(temp['Start date'], errors='coerce')
-                temp['End date'] = pd.to_datetime(temp['End date'], errors='coerce')
-                temp = temp.dropna(subset=['Start date'])
+                p_phase_col = find_col_in_list(df_phase_part.columns, phase_rules_phase[0])
+                p_start_col = find_col_in_list(df_phase_part.columns, phase_rules_start[0])
+                p_end_col = find_col_in_list(df_phase_part.columns, phase_rules_end[0])
                 
-                if not temp.empty:
+                if p_phase_col and p_start_col and p_end_col:
+                    hover_col = find_col_in_list(df_phase_part.columns, ['关键因素', '要点', 'Key Factors'])
+                    range_col = find_col_in_list(df_phase_part.columns, ['区间涨跌幅', '区间', 'Range'])
+                    
+                    cols_to_keep = [p_start_col, p_end_col, p_phase_col]
+                    if hover_col: cols_to_keep.append(hover_col)
+                    if range_col: cols_to_keep.append(range_col)
+                    
+                    temp = df_phase_part[cols_to_keep].copy()
+                    
+                    group_cols = [p_start_col, p_end_col, p_phase_col]
+                    if range_col: group_cols.append(range_col)
+                    if hover_col:
+                        temp = aggregate_details(temp, group_keys=group_cols, detail_col=hover_col, output_detail_name='关键因素')
+                        
+                    rename_dict = {p_start_col: 'Start date', p_end_col: 'End date', p_phase_col: '阶段概述'}
+                    if range_col: rename_dict[range_col] = '区间涨跌幅'
+                    
+                    temp = temp.rename(columns=rename_dict)
+                    temp['Start date'] = pd.to_datetime(temp['Start date'], errors='coerce')
+                    temp['End date'] = pd.to_datetime(temp['End date'], errors='coerce')
+                    temp = temp.dropna(subset=['Start date'])
                     phases_list.append(temp)
 
+        # 合并结果
         events_df = pd.concat(events_list, ignore_index=True) if events_list else None
         phases_df = pd.concat(phases_list, ignore_index=True) if phases_list else None
+        
         return events_df, phases_df, prices_df
 
     except Exception as e:
         print(f"解析出错: {e}")
+        import traceback
+        traceback.print_exc()
         return None, None, None
 
 def get_yahoo_data(ticker, start, end, proxy_url=None):
@@ -368,12 +373,12 @@ sidebar = dbc.Card(
             dbc.Label("0. 代理设置"),
             dbc.Checkbox(
                 label="开启代理", 
-                value=False, # 初始默认值
+                value=False,
                 id="enable-proxy"
             ),
             dbc.Input(
                 id="proxy-addr", 
-                value="http://127.0.0.1:17890", # 初始默认值
+                value="http://127.0.0.1:17890",
                 type="text", 
                 className="mb-3"
             ),
@@ -385,7 +390,7 @@ sidebar = dbc.Card(
                     {"label": "Excel Prices表", "value": "excel_price"},
                     {"label": "模拟数据", "value": "mock"},
                 ],
-                value="yahoo", # 初始默认值
+                value="yahoo",
                 id="data-source-select",
                 className="mb-3",
             ),
@@ -393,7 +398,7 @@ sidebar = dbc.Card(
             dbc.Label("2. 时间与代码"),
             dbc.Input(
                 id="ticker-input", 
-                value="6324.T", # 初始默认值
+                value="6324.T",
                 type="text", 
                 placeholder="股票代码", 
                 className="mb-2"
@@ -401,7 +406,7 @@ sidebar = dbc.Card(
             dbc.Row([
                 dbc.Col(dbc.Input(
                     id="start-date", 
-                    value="2024-12-23", # 初始默认值
+                    value="2024-12-23",
                     type="date"
                 )),
                 dbc.Col(dbc.Input(
@@ -429,7 +434,7 @@ sidebar = dbc.Card(
             dbc.Label("导出倍率", html_for="export-scale"),
             dbc.RadioItems(
                 options=[{"label": "1x", "value": 1}, {"label": "2x", "value": 2}, {"label": "3x", "value": 3}],
-                value=1, # 初始默认值
+                value=1,
                 id="export-scale", 
                 inline=True, 
                 className="mb-2"
@@ -438,44 +443,44 @@ sidebar = dbc.Card(
             dbc.Label("字体大小 (阶段 / 事件)"),
             dcc.Slider(
                 id="phase-font-size", min=10, max=80, marks=None, 
-                value=20, # 初始默认值
+                value=20,
                 tooltip={"placement": "bottom"}
             ),
             dcc.Slider(
                 id="event-font-size", min=8, max=60, marks=None, 
-                value=16, # 初始默认值
+                value=16,
                 tooltip={"placement": "bottom"}
             ),
             
             dbc.Label("布局间距 (阶段高度 / 底部留白)"),
             dcc.Slider(
                 id="phase-label-y", min=1.0, max=1.3, step=0.01, marks=None,
-                value=1.02 # 初始默认值
+                value=1.02
             ),
             dcc.Slider(
                 id="bottom-margin", min=50, max=200, marks=None,
-                value=80 # 初始默认值
+                value=80
             ),
             
             dbc.Label("标签换行 (阶段 / 事件)"),
             dcc.Slider(
                 id="label-wrap-width", min=5, max=50, marks=None,
-                value=10 # 初始默认值
+                value=10
             ),
             dbc.Label("悬浮提示换行字数"),
             dcc.Slider(
                 id="hover-wrap-width", min=20, max=80, marks=None,
-                value=40 # 初始默认值
+                value=40
             ),
             
             dbc.Label("防重叠 (引线长度 / 阶梯)"),
             dcc.Slider(
                 id="arrow-len-base", min=20, max=150, marks=None,
-                value=50 # 初始默认值
+                value=50
             ),
             dcc.Slider(
                 id="stagger-steps", min=3, max=15, marks=None,
-                value=6 # 初始默认值
+                value=6
             ),
             
             html.Br(),
@@ -524,12 +529,9 @@ content = html.Div(
     className="p-4"
 )
 
-# --- 关键修改：增加 dcc.Store(storage_type='local') ---
 app.layout = dbc.Container(
     [
-        # 这个组件负责在浏览器本地存储数据
         dcc.Store(id='local-settings-store', storage_type='local'),
-        
         dbc.Row(
             [
                 dbc.Col(sidebar, width=3, className="bg-light"),
@@ -557,7 +559,6 @@ def toggle_mode(mode):
     else:
         return {'display': 'none'}, {'display': 'block'}, {'display': 'none'}
 
-# --- 核心逻辑1：保存配置到浏览器 (Local Storage) ---
 @app.callback(
     [Output("local-settings-store", "data"),
      Output("save-defaults-msg", "children")],
@@ -582,7 +583,6 @@ def save_settings_to_browser(n, *args):
     if not n:
         return no_update, ""
     
-    # 将所有参数打包成字典
     settings_data = {
         "enable-proxy": args[0],
         "proxy-addr": args[1],
@@ -603,7 +603,6 @@ def save_settings_to_browser(n, *args):
     
     return settings_data, dbc.Alert("✅ 配置已保存到您的浏览器！", color="success", dismissable=True, style={"padding": "5px", "fontSize": "0.8rem"})
 
-# --- 核心逻辑2：从浏览器加载配置 (Local Storage) ---
 @app.callback(
     [Output("enable-proxy", "value"),
      Output("proxy-addr", "value"),
@@ -624,7 +623,6 @@ def save_settings_to_browser(n, *args):
 )
 def load_settings_from_browser(data):
     if not data:
-        # 如果没有保存过，保持页面初始默认值不变
         return [no_update] * 15
     
     try:
